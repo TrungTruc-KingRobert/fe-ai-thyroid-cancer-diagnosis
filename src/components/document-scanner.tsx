@@ -8,9 +8,9 @@ const DocumentScanner = () => {
   const rawCanvasRef = useRef<HTMLCanvasElement>(null);
   const outputCanvasRef = useRef<HTMLCanvasElement>(null);
   const [jscanifyLoaded, setJscanifyLoaded] = useState(false);
-  const [ocrLoaded, setOcrLoaded] = useState(false);
+  // const [ocrLoaded, setOcrLoaded] = useState(false);
   const [extractedData, setExtractedData] = useState<Record<string, string>>({});
-  const [openCVLoaded, setOpenCVLoaded] = useState(false);
+  const [_openCVLoaded, setOpenCVLoaded] = useState(false);
 
   // Hàm tắt camera
   const stopCamera = () => {
@@ -252,36 +252,36 @@ const DocumentScanner = () => {
 
       // Cải thiện ảnh trước khi OCR
       let processedCanvas = canvas;
-      
+
       if (cv) {
         // Chuyển canvas thành Mat
         let src = cv.imread(canvas);
         let gray = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
-        
+
         // Convert to grayscale
         cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-        
+
         // Tăng contrast (CLAHE - Contrast Limited Adaptive Histogram Equalization)
         let clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
         let enhanced = new cv.Mat();
         clahe.apply(gray, enhanced);
-        
+
         // Threshold để làm text rõ hơn
         let binary = new cv.Mat();
         cv.threshold(enhanced, binary, 150, 255, cv.THRESH_BINARY);
-        
+
         // Vẽ lên canvas
         processedCanvas = document.createElement('canvas');
         processedCanvas.width = canvas.width;
         processedCanvas.height = canvas.height;
         cv.imshow(processedCanvas, binary);
-        
+
         // Cleanup
         src.delete();
         gray.delete();
         enhanced.delete();
         binary.delete();
-        
+
         console.log("Image preprocessing done");
       }
 
