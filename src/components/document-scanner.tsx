@@ -11,6 +11,7 @@ const DocumentScanner = () => {
   // const [ocrLoaded, setOcrLoaded] = useState(false);
   const [extractedData, setExtractedData] = useState<Record<string, string>>({});
   const [_openCVLoaded, setOpenCVLoaded] = useState(false);
+  const [savedData, setSavedData] = useState<Record<string, string>>({});
 
   // Hàm tắt camera
   const stopCamera = () => {
@@ -240,7 +241,6 @@ const DocumentScanner = () => {
   // Hàm thực hiện OCR và trích xuất dữ liệu
   const performOCR = async (canvas: HTMLCanvasElement) => {
     const tesseract = (window as any).Tesseract;
-    const cv = (window as any).cv;
 
     if (!tesseract) {
       alert("Tesseract chưa được tải. Vui lòng thử lại.");
@@ -250,98 +250,146 @@ const DocumentScanner = () => {
     try {
       console.log("Starting OCR...");
 
-      // Cải thiện ảnh trước khi OCR
-      let processedCanvas = canvas;
+      // Tăng độ phân giải canvas để OCR đọc tốt hơn từ xa
+      const upscaledCanvas = document.createElement('canvas');
+      const scale = 2; // Tăng 2x độ phân giải
+      upscaledCanvas.width = canvas.width * scale;
+      upscaledCanvas.height = canvas.height * scale;
 
-      if (cv) {
-        // Chuyển canvas thành Mat
-        let src = cv.imread(canvas);
-        let gray = cv.Mat.zeros(src.rows, src.cols, cv.CV_8U);
-
-        // Convert to grayscale
-        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-        // Tăng contrast (CLAHE - Contrast Limited Adaptive Histogram Equalization)
-        let clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
-        let enhanced = new cv.Mat();
-        clahe.apply(gray, enhanced);
-
-        // Threshold để làm text rõ hơn
-        let binary = new cv.Mat();
-        cv.threshold(enhanced, binary, 150, 255, cv.THRESH_BINARY);
-
-        // Vẽ lên canvas
-        processedCanvas = document.createElement('canvas');
-        processedCanvas.width = canvas.width;
-        processedCanvas.height = canvas.height;
-        cv.imshow(processedCanvas, binary);
-
-        // Cleanup
-        src.delete();
-        gray.delete();
-        enhanced.delete();
-        binary.delete();
-
-        console.log("Image preprocessing done");
+      const upscaledCtx = upscaledCanvas.getContext('2d');
+      if (upscaledCtx) {
+        upscaledCtx.imageSmoothingEnabled = true;
+        upscaledCtx.imageSmoothingQuality = 'high';
+        upscaledCtx.drawImage(canvas, 0, 0, upscaledCanvas.width, upscaledCanvas.height);
       }
 
-      // Chuyển canvas thành blob
+      // Áp dụng preprocessing: làm nét ảnh + tăng độ tương phản
+      const processedCanvas = document.createElement('canvas');
+      processedCanvas.width = upscaledCanvas.width;
+      processedCanvas.height = upscaledCanvas.height;
+
+      const processedCtx = processedCanvas.getContext('2d');
+      if (processedCtx) {
+        processedCtx.drawImage(upscaledCanvas, 0, 0);
+
+        // Lấy image data
+        const imageData = processedCtx.getImageData(0, 0, processedCanvas.width, processedCanvas.height);
+        const data = imageData.data;
+        const width = processedCanvas.width;
+        const height = processedCanvas.height;
+
+        // Bước 1: Làm nét ảnh bằng unsharp masking
+        const sharpKernel = [
+          0, -1, 0,
+          -1, 5, -1,
+          0, -1, 0
+        ];
+
+        // Tính toán convolution cho sharpening
+        const tempData = new Uint8ClampedArray(data);
+        for (let i = 0; i < data.length; i += 4) {
+          const pixelIndex = i / 4;
+          const x = pixelIndex % width;
+          const y = Math.floor(pixelIndex / width);
+
+          if (x > 0 && x < width - 1 && y > 0 && y < height - 1) {
+            let r = 0, g = 0, b = 0;
+
+            // Áp dụng kernel
+            for (let ky = -1; ky <= 1; ky++) {
+              for (let kx = -1; kx <= 1; kx++) {
+                const kernelIndex = (ky + 1) * 3 + (kx + 1);
+                const neighborPixelIndex = ((y + ky) * width + (x + kx)) * 4;
+                const weight = sharpKernel[kernelIndex];
+
+                r += tempData[neighborPixelIndex] * weight;
+                g += tempData[neighborPixelIndex + 1] * weight;
+                b += tempData[neighborPixelIndex + 2] * weight;
+              }
+            }
+
+            // Normalize và clamp
+            data[i] = Math.max(0, Math.min(255, r / 1));
+            data[i + 1] = Math.max(0, Math.min(255, g / 1));
+            data[i + 2] = Math.max(0, Math.min(255, b / 1));
+          }
+        }
+
+        // Bước 2: Tăng độ tương phản
+        for (let i = 0; i < data.length; i += 4) {
+          const brightness = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          const factor = brightness > 128 ? 1.4 : 0.6; // Tăng tương phản mạnh hơn
+
+          data[i] = Math.min(255, data[i] * factor); // R
+          data[i + 1] = Math.min(255, data[i + 1] * factor); // G
+          data[i + 2] = Math.min(255, data[i + 2] * factor); // B
+        }
+
+        processedCtx.putImageData(imageData, 0, 0);
+      }
+
+      // Chuyển processed canvas thành blob
       processedCanvas.toBlob(async (blob) => {
         if (!blob) return;
 
-        const { data: { text } } = await tesseract.recognize(blob, "vie+eng");
+        // Sử dụng psm: 6 (Assume single uniform block of text) để tốt hơn với document
+
+        const { data: { text } } = await tesseract.recognize(blob, "vie+eng", {
+          tessedit_pageseg_mode: 6
+        });
         console.log("OCR Raw Text:", text);
 
-        // Parse text để tìm FT4 và giá trị của nó
-        const data: Record<string, string> = {};
-
-        // Cách 1: Tìm FT4 và số tiếp theo (có thể cách nhau)
-        const ft4Match = text.match(/FT4[^\d]*([0-9]{1,2}[.,][0-9]{1,2})/i);
-        if (ft4Match) {
-          data['FT4'] = ft4Match[1];
-          console.log("FT4 found (method 1):", ft4Match[1]);
-        } else {
-          // Cách 2: Tìm "FT4" rồi lấy số đầu tiên sau đó
-          const ft4Index = text.toUpperCase().indexOf('FT4');
-          if (ft4Index !== -1) {
-            const afterFT4 = text.substring(ft4Index + 3, ft4Index + 30);
-            const numMatch = afterFT4.match(/([0-9]{1,2}[.,][0-9]{1,2})/);
-            if (numMatch) {
-              data['FT4'] = numMatch[1];
-              console.log("FT4 found (method 2):", numMatch[1]);
-            }
-          }
-        }
-
-        // Tìm các chỉ số khác (TSH, T3, T4, etc.)
-        const testPatterns = [
-          { name: 'TSH', regex: /TSH[^\d]*([0-9]{0,2}[.,][0-9]{1,3})/i },
-          { name: 'T3', regex: /T3[^\d]*([0-9]{1,3}[.,][0-9]{1,2})/i },
-          { name: 'T4', regex: /T4[^\d]*([0-9]{1,2}[.,][0-9]{1,2})/i },
-          { name: 'TPO', regex: /TPO[^\d]*([0-9]{1,3}[.,][0-9]{1,2})/i },
-        ];
-
-        for (const pattern of testPatterns) {
-          const match = text.match(pattern.regex);
-          if (match && !data[pattern.name]) {
-            data[pattern.name] = match[1];
-            console.log(`${pattern.name} found:`, match[1]);
-          }
-        }
-
         // Lưu raw OCR text để hiển thị
+        const data: Record<string, string> = {};
         data['_raw_text'] = text;
 
+        // Các chỉ số cần tìm
+        const indicators = ['FT4', 'FT3', 'TSH', 'Tg', 'Anti-Tg', 'Glucose', 'Protein'];
+
+        indicators.forEach((indicator) => {
+          // Tìm chỉ số trong text (case-insensitive)
+          const searchTerm = indicator;
+          const regex = new RegExp(searchTerm, 'i');
+          const index = text.search(regex);
+
+          if (index !== -1) {
+            // Lấy 100 ký tự sau indicator để tìm giá trị
+            const afterIndicator = text.substring(index, index + 100);
+            console.log(`Searching for ${indicator} (term: ${searchTerm}), afterIndicator:`, afterIndicator);
+
+            // Tìm số - có thể là:
+            // - XX.XX hoặc XX,XX (số thập phân)
+            // - XXX hoặc XXXX (số nguyên)
+            // - XX.XXX hoặc XX,XXX (số có nhiều chữ số thập phân)
+            const numberMatch = afterIndicator.match(/\b([0-9]{1,4}(?:[.,][0-9]{1,3})?)\b/);
+
+            if (numberMatch) {
+              data[indicator] = numberMatch[1];
+              console.log(`${indicator} found: ${numberMatch[1]}`);
+            } else {
+              console.log(`${indicator} not found in: ${afterIndicator}`);
+            }
+          }
+        });
         setExtractedData(data);
         console.log("Extracted data:", data);
-        console.log("Raw OCR text:", text);
-
-        alert("OCR hoàn tất. Xem kết quả bên dưới.");
       });
     } catch (error) {
       console.error("OCR Error:", error);
       alert("Lỗi khi nhận diện text.");
     }
+  };
+
+  // Hàm lưu dữ liệu
+  const handleSaveData = () => {
+    const dataToSave: Record<string, string> = {};
+    ['FT4', 'FT3', 'TSH', 'Tg', 'Anti-Tg', 'Glucose', 'Protein'].forEach((indicator) => {
+      if (extractedData[indicator]) {
+        dataToSave[indicator] = extractedData[indicator];
+      }
+    });
+    setSavedData(dataToSave);
+    alert("Đã lưu kết quả!");
   };
 
   return (
@@ -379,32 +427,87 @@ const DocumentScanner = () => {
       {/* Hiển thị kết quả extracted */}
       {Object.keys(extractedData).length > 0 && (
         <div style={{ marginTop: 16, padding: 12, backgroundColor: '#f0f0f0', borderRadius: 8 }}>
-          <h3 style={{ fontSize: 14, fontWeight: 'bold', marginBottom: 8 }}>Kết quả nhận diện:</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 'bold', marginBottom: 12 }}>Kết quả nhận diện:</h3>
 
-          {/* Hiển thị các chỉ số đã extract */}
-          {Object.entries(extractedData)
-            .filter(([key]) => key !== '_raw_text')
-            .map(([key, value]) => (
-              <div key={key} style={{ marginBottom: 8, padding: 8, backgroundColor: '#fff', borderRadius: 4, borderLeft: '3px solid #0066cc' }}>
-                <span style={{ fontWeight: 'bold', fontSize: 14 }}>{key}:</span>
-                <span style={{ marginLeft: 8, fontSize: 14 }}>{value}</span>
-              </div>
-            ))}
+          {/* Layout hai cột: Trái (kết quả hiện tại), Phải (kết quả đã lưu) */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            {/* Cột trái: Kết quả hiện tại */}
+            <div style={{ backgroundColor: '#fff', padding: 12, borderRadius: 4 }}>
+              <h4 style={{ fontSize: 13, fontWeight: 'bold', marginBottom: 8, color: '#1976d2' }}>Kết quả hiện tại:</h4>
+              {['FT4', 'FT3', 'TSH', 'Tg', 'Anti-Tg', 'Glucose', 'Protein'].map((indicator) => (
+                <div key={indicator} style={{ marginBottom: 6, fontSize: 12 }}>
+                  {extractedData[indicator] ? (
+                    <span style={{ color: '#2e7d32' }}>
+                      <span style={{ fontWeight: 'bold' }}>{indicator}: </span>
+                      <span>{extractedData[indicator]}</span>
+                    </span>
+                  ) : (
+                    <span style={{ color: '#999' }}>
+                      {indicator}: <em>-</em>
+                    </span>
+                  )}
+                </div>
+              ))}
 
-          {/* Hiển thị raw text nếu có */}
+              {/* Nút Lưu */}
+              <button
+                onClick={handleSaveData}
+                style={{
+                  width: '100%',
+                  marginTop: 12,
+                  padding: '8px 12px',
+                  backgroundColor: '#4caf50',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: 4,
+                  fontWeight: 'bold',
+                  cursor: 'pointer',
+                  fontSize: 12
+                }}
+              >
+                Lưu
+              </button>
+            </div>
+
+            {/* Cột phải: Kết quả đã lưu */}
+            <div style={{ backgroundColor: '#e8f5e9', padding: 12, borderRadius: 4 }}>
+              <h4 style={{ fontSize: 13, fontWeight: 'bold', marginBottom: 8, color: '#2e7d32' }}>Kết quả đã lưu:</h4>
+              {Object.keys(savedData).length > 0 ? (
+                ['FT4', 'FT3', 'TSH', 'Tg', 'Anti-Tg', 'Glucose', 'Protein'].map((indicator) => (
+                  <div key={indicator} style={{ marginBottom: 6, fontSize: 12 }}>
+                    {savedData[indicator] ? (
+                      <span style={{ color: '#2e7d32' }}>
+                        <span style={{ fontWeight: 'bold' }}>{indicator}: </span>
+                        <span>{savedData[indicator]}</span>
+                      </span>
+                    ) : (
+                      <span style={{ color: '#999' }}>
+                        {indicator}: <em>-</em>
+                      </span>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <span style={{ color: '#999', fontSize: 12 }}>Chưa có dữ liệu lưu</span>
+              )}
+            </div>
+          </div>
+
+          {/* Hiển thị toàn bộ raw text */}
           {extractedData['_raw_text'] && (
             <div style={{ marginTop: 12, padding: 8, backgroundColor: '#fff', borderRadius: 4, borderTop: '1px solid #ddd' }}>
-              <h4 style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 6 }}>Raw OCR Text:</h4>
+              <h4 style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 6 }}>Toàn bộ text nhận diện được:</h4>
               <div style={{
                 fontSize: 11,
                 fontFamily: 'monospace',
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
-                maxHeight: 200,
+                maxHeight: 250,
                 overflow: 'auto',
-                padding: 6,
+                padding: 8,
                 backgroundColor: '#f9f9f9',
-                border: '1px solid #ddd'
+                border: '1px solid #ddd',
+                lineHeight: '1.4'
               }}>
                 {extractedData['_raw_text']}
               </div>
